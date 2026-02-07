@@ -4,6 +4,209 @@ function uid() {
   return Math.random().toString(16).slice(2) + Date.now().toString(16);
 }
 
+function isSelectionInside(elm) {
+  try {
+    const sel = window.getSelection?.();
+    if (!sel || sel.rangeCount === 0) return false;
+    const r = sel.getRangeAt(0);
+    if (!r || r.collapsed) return false;
+    const c = r.commonAncestorContainer;
+    const node = c && c.nodeType === Node.ELEMENT_NODE ? c : c?.parentElement;
+    return !!node && elm.contains(node);
+  } catch {
+    return false;
+  }
+}
+
+function applyAnswerHighlight(color) {
+  const qa = getCurrentQa();
+  if (!qa) return;
+  if (!ui.viewAnswer) return;
+
+  // Only support direct rich-html view (not mask/check rendering)
+  const richRoot = ui.viewAnswer.querySelector('.rich-answer-editable');
+  if (!richRoot) {
+    alert('当前答案不是富文本展示状态，无法进行框选标注。请停止播放/关闭遮罩或清空检测后再试。');
+    return;
+  }
+
+  if (!isSelectionInside(richRoot)) {
+    alert('请先在答案区域框选一段文字，再点击标注颜色。');
+    return;
+  }
+
+  const sel = window.getSelection();
+  const range = sel.getRangeAt(0);
+  if (!range || range.collapsed) return;
+
+  try {
+    const mk = document.createElement('mark');
+    mk.setAttribute('data-color', String(color || 'yellow'));
+    const frag = range.extractContents();
+    mk.appendChild(frag);
+    range.insertNode(mk);
+
+    // Merge nested marks created by repeated operations
+    richRoot.querySelectorAll('mark mark').forEach((inner) => {
+      const outer = inner.parentElement;
+      if (!outer) return;
+      while (inner.firstChild) outer.insertBefore(inner.firstChild, inner);
+      inner.remove();
+    });
+
+    // Persist
+    const nextHtml = sanitizeAnswerHtml(richRoot.innerHTML || '');
+    if (nextHtml.includes('▇▇▇▇▇▇')) {
+      alert('检测到答案处于遮罩状态（包含占位符）。请先关闭遮罩/清空检测后再进行标注。');
+      return;
+    }
+    const nextText = htmlToPlainTextPreserveLines(nextHtml);
+    upsertQa({ ...qa, answerHtml: nextHtml, answerText: nextText, updatedAt: nowIso() });
+    saveState();
+    render();
+    updateMatches();
+    try { sel.removeAllRanges(); } catch {}
+  } catch {
+    alert('该段文字跨越了复杂结构，无法直接标注。请尽量在同一段落内框选。');
+  }
+}
+
+function clearAnswerHighlights() {
+  const qa = getCurrentQa();
+  if (!qa) return;
+  if (!ui.viewAnswer) return;
+
+  const richRoot = ui.viewAnswer.querySelector('.rich-answer-editable');
+  if (!richRoot) {
+    alert('当前答案不是富文本展示状态，无法清除标注。请停止播放/关闭遮罩或清空检测后再试。');
+    return;
+  }
+
+  // If selection is inside, only clear marks intersecting selection; otherwise clear all.
+  const onlySel = isSelectionInside(richRoot);
+  if (!onlySel) {
+    richRoot.querySelectorAll('mark').forEach((m) => {
+      const p = m.parentNode;
+      if (!p) return;
+      while (m.firstChild) p.insertBefore(m.firstChild, m);
+      m.remove();
+    });
+  } else {
+    const sel = window.getSelection();
+    const range = sel && sel.rangeCount ? sel.getRangeAt(0) : null;
+    if (!range) return;
+    const marks = Array.from(richRoot.querySelectorAll('mark'));
+    marks.forEach((m) => {
+      try {
+        if (!range.intersectsNode(m)) return;
+      } catch {
+        // Older browsers may throw; fall back to clearing all when selection exists
+      }
+      const p = m.parentNode;
+      if (!p) return;
+      while (m.firstChild) p.insertBefore(m.firstChild, m);
+      m.remove();
+    });
+  }
+
+  const nextHtml = sanitizeAnswerHtml(richRoot.innerHTML || '');
+  if (nextHtml.includes('▇▇▇▇▇▇')) {
+    alert('检测到答案处于遮罩状态（包含占位符）。请先关闭遮罩/清空检测后再清除标注。');
+    return;
+  }
+  const nextText = htmlToPlainTextPreserveLines(nextHtml);
+  upsertQa({ ...qa, answerHtml: nextHtml, answerText: nextText, updatedAt: nowIso() });
+  saveState();
+  render();
+  updateMatches();
+}
+
+function repairMaskPlaceholderForCurrentQa() {
+  const qa = getCurrentQa();
+  if (!qa) return;
+  const htmlHas = String(qa.answerHtml || '').includes('▇▇▇▇▇▇');
+  const textHas = String(qa.answerText || '').includes('▇▇▇▇▇▇');
+  if (!htmlHas && !textHas) {
+    alert('未检测到遮罩占位符污染，无需修复。');
+    return;
+  }
+
+  const ok = confirm('检测到答案已被“遮罩占位符”污染（▇▇▇▇▇▇）。修复会移除这些占位符；若占位符覆盖了原文，原文需要你手动补回。是否继续？');
+  if (!ok) return;
+
+  let nextHtml = '';
+  let nextText = '';
+
+  if (!textHas && String(qa.answerText || '').trim()) {
+    nextText = String(qa.answerText || '');
+    nextHtml = sanitizeAnswerHtml(escapeHtml(nextText).replace(/\n/g, '<br>'));
+  } else {
+    const safeHtml = sanitizeAnswerHtml(normalizeImportedHtml(qa.answerHtml || ''));
+    nextHtml = safeHtml.split('▇▇▇▇▇▇').join('');
+    nextText = htmlToPlainTextPreserveLines(nextHtml).replace(/▇▇▇▇▇▇/g, '').trim();
+    nextHtml = sanitizeAnswerHtml(nextHtml);
+  }
+
+  upsertQa({ ...qa, answerHtml: nextHtml, answerText: nextText, updatedAt: nowIso() });
+  saveState();
+  ui.inputRecited.value = '';
+  resetReciteCheck();
+  render();
+  fillEditorFromCurrent();
+  updateMatches();
+}
+
+function getReciteBucketId(level) {
+  const lv = Number(level);
+  if (lv === 0) return RECITE_BUCKETS[0].id;
+  if (lv === 1) return RECITE_BUCKETS[1].id;
+  if (lv === 2) return RECITE_BUCKETS[2].id;
+  return RECITE_BUCKETS[1].id;
+}
+
+function markCurrentQaToReciteLevel(level) {
+  const qa = getCurrentQa();
+  if (!qa) return;
+  if (!listState.collectionId) {
+    alert('请先进入一个合集，再进行归档。');
+    return;
+  }
+
+  flushFocusPoints();
+  commitActiveQaTime('markLevel');
+  stopPlayer();
+
+  const sourceCollectionId = listState.collectionId;
+  const base = state.qas.filter((x) => (x.collectionId || DEFAULT_COLLECTION_ID) === sourceCollectionId);
+  const idx = base.findIndex((x) => x.id === qa.id);
+  const nextQaId = idx >= 0 && idx + 1 < base.length ? base[idx + 1].id : idx > 0 ? base[idx - 1].id : null;
+
+  const counts = qa.reciteLevelCounts && typeof qa.reciteLevelCounts === 'object' ? { ...qa.reciteLevelCounts } : { 0: 0, 1: 0, 2: 0 };
+  const k = String(Number(level));
+  counts[k] = (Number(counts[k]) || 0) + 1;
+
+  const targetCollectionId = getReciteBucketId(level);
+  upsertQa({
+    ...qa,
+    reciteLevel: Number(level),
+    reciteLevelCounts: counts,
+    collectionId: targetCollectionId,
+    updatedAt: nowIso(),
+  });
+
+  // Move on within the source collection
+  if (nextQaId) {
+    setCurrentQa(nextQaId);
+    fillEditorFromCurrent();
+  } else {
+    state.progress.currentQaId = null;
+    saveState();
+    render();
+    fillEditorFromCurrent();
+    updateMatches();
+  }
+}
+
 function deleteCurrentCollectionQas() {
   const colId = listState.collectionId;
   if (!colId) return;
@@ -40,8 +243,8 @@ function deleteCurrentCollectionQas() {
 
 function deleteCollectionById(colId) {
   if (!colId) return;
-  if (colId === DEFAULT_COLLECTION_ID) {
-    alert('默认合集不能删除。');
+  if (PROTECTED_COLLECTION_IDS.has(colId)) {
+    alert('该合集不能删除。');
     return;
   }
 
@@ -281,6 +484,8 @@ function defaultState() {
       ttsVoiceUri: '',
       autoPlayNextQa: false,
       forceReciteCheck: false,
+      reciteOnlyHighlights: false,
+      qaReciteSideBySide: false,
       rate: 1.0,
       volume: 1.0,
       threshold: 0.65,
@@ -432,14 +637,79 @@ function normalizeImportedHtml(html) {
   const body = doc.body;
   if (!body) return '';
 
-  // Convert background-highlight spans into <mark>
-  body.querySelectorAll('span').forEach((sp) => {
-    const style = (sp.getAttribute('style') || '').toLowerCase();
-    if (/background(-color)?\s*:/.test(style)) {
-      const mk = doc.createElement('mark');
-      mk.innerHTML = sp.innerHTML;
-      sp.replaceWith(mk);
+  const cssToMarkColor = (raw) => {
+    const v = String(raw || '').trim().toLowerCase();
+    if (!v) return 'yellow';
+    if (v.includes('yellow')) return 'yellow';
+    if (v.includes('green')) return 'green';
+    if (v.includes('cyan') || v.includes('aqua') || v.includes('turquoise')) return 'cyan';
+    if (v.includes('magenta') || v.includes('fuchsia') || v.includes('purple') || v.includes('violet')) return 'magenta';
+
+    const hex = v.match(/#([0-9a-f]{3}|[0-9a-f]{6})/i)?.[0];
+    if (hex) {
+      let h = hex.slice(1);
+      if (h.length === 3) h = h.split('').map((c) => c + c).join('');
+      const r = parseInt(h.slice(0, 2), 16);
+      const g = parseInt(h.slice(2, 4), 16);
+      const b = parseInt(h.slice(4, 6), 16);
+      if (r > 220 && g > 220 && b < 120) return 'yellow';
+      if (g > 180 && r < 140 && b < 140) return 'green';
+      if (b > 180 && g > 180 && r < 140) return 'cyan';
+      if (r > 160 && b > 160 && g < 150) return 'magenta';
+      return 'yellow';
     }
+
+    const rgb = v.match(/rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)/i);
+    if (rgb) {
+      const r = Number(rgb[1]);
+      const g = Number(rgb[2]);
+      const b = Number(rgb[3]);
+      if (r > 220 && g > 220 && b < 120) return 'yellow';
+      if (g > 180 && r < 140 && b < 140) return 'green';
+      if (b > 180 && g > 180 && r < 140) return 'cyan';
+      if (r > 160 && b > 160 && g < 150) return 'magenta';
+      return 'yellow';
+    }
+
+    return 'yellow';
+  };
+
+  const parseStyle = (style) => {
+    const s = String(style || '').toLowerCase();
+    const bg = s.match(/background(?:-color)?\s*:\s*([^;]+)/i)?.[1]?.trim();
+    const fw = s.match(/font-weight\s*:\s*([^;]+)/i)?.[1]?.trim();
+    const bold = fw === 'bold' || Number(fw) >= 600;
+    return { bg, bold };
+  };
+
+  // Convert mammoth spans with background/font-weight into our markup
+  body.querySelectorAll('span').forEach((sp) => {
+    const { bg, bold } = parseStyle(sp.getAttribute('style') || '');
+    if (!bg && !bold) return;
+
+    let root = null;
+    let leaf = null;
+
+    if (bg) {
+      const mk = doc.createElement('mark');
+      mk.setAttribute('data-color', cssToMarkColor(bg));
+      root = mk;
+      leaf = mk;
+    }
+
+    if (bold) {
+      const st = doc.createElement('strong');
+      if (!root) {
+        root = st;
+        leaf = st;
+      } else {
+        leaf.appendChild(st);
+        leaf = st;
+      }
+    }
+
+    leaf.innerHTML = sp.innerHTML;
+    sp.replaceWith(root);
   });
 
   // Strip scripts/styles
@@ -465,8 +735,12 @@ function sanitizeAnswerHtml(html) {
       node.replaceWith(frag);
       continue;
     }
-    // Remove all attributes (keep clean)
-    Array.from(node.attributes || []).forEach((a) => node.removeAttribute(a.name));
+    // Remove all attributes (keep clean), but preserve mark color
+    Array.from(node.attributes || []).forEach((a) => {
+      const name = String(a.name || '').toLowerCase();
+      if (tag === 'MARK' && name === 'data-color') return;
+      node.removeAttribute(a.name);
+    });
   }
 
   return body.innerHTML;
@@ -491,6 +765,35 @@ function htmlToPlainTextPreserveLines(html) {
 function extractAnswerHtmlFromRichEditor() {
   if (!ui.inputAnswerRich) return '';
   return sanitizeAnswerHtml(ui.inputAnswerRich.innerHTML || '');
+}
+
+function extractHighlightSegmentsFromAnswerHtml(answerHtml) {
+  try {
+    const rawHtml = sanitizeAnswerHtml(normalizeImportedHtml(answerHtml || ''));
+    const doc = new DOMParser().parseFromString(rawHtml || '', 'text/html');
+    const marks = Array.from(doc.body?.querySelectorAll('mark') || []);
+    const segs = [];
+    for (const m of marks) {
+      const t = String(m.textContent || '').replace(/[\u00a0]/g, ' ').trim();
+      if (!t) continue;
+      segs.push(t);
+    }
+    return segs;
+  } catch {
+    return [];
+  }
+}
+
+function getReciteSegmentsForQa(qa) {
+  const onlyHi = !!state?.settings?.reciteOnlyHighlights;
+  if (onlyHi && qa?.answerHtml) {
+    const parts = extractHighlightSegmentsFromAnswerHtml(qa.answerHtml);
+    const segments = parts.map((t, i) => ({ globalIndex: i, sentenceIndex: 0, segmentIndex: i, text: t }));
+    const bySentence = [segments];
+    return { segments, bySentence };
+  }
+  const sentences = splitSentences(qa?.answerText || '');
+  return buildSegments(sentences);
 }
 
 function setRichEditorHtml(html) {
@@ -534,6 +837,7 @@ const ui = {
   selectTtsVoice: el('selectTtsVoice'),
   checkAutoPlayNext: el('checkAutoPlayNext'),
   checkForceRecite: el('checkForceRecite'),
+  checkQaReciteSideBySide: el('checkQaReciteSideBySide'),
   inputFullReadBefore: el('inputFullReadBefore'),
   inputFullReadAfter: el('inputFullReadAfter'),
   inputReviewPrevRepeat: el('inputReviewPrevRepeat'),
@@ -547,12 +851,21 @@ const ui = {
   viewQuestion: el('viewQuestion'),
   viewAnswer: el('viewAnswer'),
   inputFocusPoints: el('inputFocusPoints'),
+  qaReciteWrap: el('qaReciteWrap'),
 
   btnCardMode: el('btnCardMode'),
   btnCardPrev: el('btnCardPrev'),
   btnCardFlip: el('btnCardFlip'),
   btnCardNext: el('btnCardNext'),
   btnMaskToggleAll: el('btnMaskToggleAll'),
+
+  btnAnsMarkYellow: el('btnAnsMarkYellow'),
+  btnAnsMarkGreen: el('btnAnsMarkGreen'),
+  btnAnsMarkCyan: el('btnAnsMarkCyan'),
+  btnAnsMarkMagenta: el('btnAnsMarkMagenta'),
+  btnAnsMarkClear: el('btnAnsMarkClear'),
+
+  ansMarkPalette: el('ansMarkPalette'),
 
   btnStart: el('btnStart'),
   btnPause: el('btnPause'),
@@ -561,9 +874,16 @@ const ui = {
   btnPrev: el('btnPrev'),
   btnNext: el('btnNext'),
 
+  btnMarkLevel0: el('btnMarkLevel0'),
+  btnMarkLevel1: el('btnMarkLevel1'),
+  btnMarkLevel2: el('btnMarkLevel2'),
+  reciteLevelStats: el('reciteLevelStats'),
+
   btnRecStart: el('btnRecStart'),
   btnRecStop: el('btnRecStop'),
   btnCheck: el('btnCheck'),
+  btnRepairMaskPlaceholder: el('btnRepairMaskPlaceholder'),
+  checkReciteOnlyHighlights: el('checkReciteOnlyHighlights'),
   inputRecited: el('inputRecited'),
   matchSummary: el('matchSummary'),
   speechHint: el('speechHint'),
@@ -584,10 +904,62 @@ const ui = {
   btnQaTimerPause: el('btnQaTimerPause'),
 };
 
+function hideAnsMarkPalette() {
+  if (!ui.ansMarkPalette) return;
+  ui.ansMarkPalette.style.display = 'none';
+}
+
+function showAnsMarkPaletteNearSelection() {
+  if (!ui.ansMarkPalette) return;
+  if (!ui.viewAnswer) return;
+
+  const qa = getCurrentQa();
+  if (!qa) return hideAnsMarkPalette();
+
+  const richRoot = ui.viewAnswer.querySelector('.rich-answer-editable');
+  if (!richRoot) return hideAnsMarkPalette();
+
+  const sel = window.getSelection?.();
+  if (!sel || sel.rangeCount === 0) return hideAnsMarkPalette();
+  const range = sel.getRangeAt(0);
+  if (!range || range.collapsed) return hideAnsMarkPalette();
+
+  if (!isSelectionInside(richRoot)) return hideAnsMarkPalette();
+
+  const rect = range.getBoundingClientRect();
+  if (!rect || (!rect.width && !rect.height)) return hideAnsMarkPalette();
+
+  const prev = ui.ansMarkPalette.style.display;
+  ui.ansMarkPalette.style.display = 'flex';
+  const pw = ui.ansMarkPalette.offsetWidth || 190;
+  const ph = ui.ansMarkPalette.offsetHeight || 40;
+  ui.ansMarkPalette.style.display = prev || 'none';
+
+  const pad = 8;
+  let top = rect.top - ph - pad;
+  if (top < 8) top = rect.bottom + pad;
+
+  let left = rect.right - pw;
+  if (left < 8) left = rect.left;
+  if (left + pw > window.innerWidth - 8) left = window.innerWidth - pw - 8;
+
+  ui.ansMarkPalette.style.left = `${Math.round(left)}px`;
+  ui.ansMarkPalette.style.top = `${Math.round(top)}px`;
+  ui.ansMarkPalette.style.display = 'flex';
+}
+
 let state = loadState();
 if (!state.progress.currentQaId && state.qas.length) state.progress.currentQaId = state.qas[0].id;
 
 const DEFAULT_COLLECTION_ID = 'default';
+
+const RECITE_BUCKETS = [
+  { id: 'recite_level_0', name: '0-不会' },
+  { id: 'recite_level_1', name: '1-一般' },
+  { id: 'recite_level_2', name: '2-会了' },
+];
+
+const PROTECTED_COLLECTION_IDS = new Set([DEFAULT_COLLECTION_ID, ...RECITE_BUCKETS.map((x) => x.id)]);
 
 function ensureCollections() {
   if (!Array.isArray(state.collections)) {
@@ -596,6 +968,14 @@ function ensureCollections() {
   if (!state.collections.find((c) => c.id === DEFAULT_COLLECTION_ID)) {
     state.collections.unshift({ id: DEFAULT_COLLECTION_ID, name: '默认合集', createdAt: nowIso() });
   }
+
+  // Ensure recite bucket collections exist
+  for (const b of RECITE_BUCKETS) {
+    if (!state.collections.find((c) => c.id === b.id)) {
+      state.collections.push({ id: b.id, name: b.name, createdAt: nowIso() });
+    }
+  }
+
   state.qas = (state.qas || []).map((qa) => {
     if (!qa || typeof qa !== 'object') return qa;
     if (!qa.collectionId) return { ...qa, collectionId: DEFAULT_COLLECTION_ID };
@@ -1079,7 +1459,7 @@ function renderQaList() {
     ui.qaList.innerHTML = cols
       .map((c) => {
         const n = counts.get(c.id) || 0;
-        const disableDel = c.id === DEFAULT_COLLECTION_ID ? 'disabled' : '';
+        const disableDel = PROTECTED_COLLECTION_IDS.has(c.id) ? 'disabled' : '';
         return `
           <div class="qa-item" data-col-id="${c.id}">
             <div class="qa-item-row">
@@ -1210,6 +1590,7 @@ function renderSettings() {
   populateTtsVoiceSelect();
   ui.checkAutoPlayNext.checked = !!s.autoPlayNextQa;
   if (ui.checkForceRecite) ui.checkForceRecite.checked = !!s.forceReciteCheck;
+  if (ui.checkQaReciteSideBySide) ui.checkQaReciteSideBySide.checked = !!s.qaReciteSideBySide;
   ui.inputFullReadBefore.value = String(s.fullReadBeforeGroups || 1);
   ui.inputFullReadAfter.value = String(s.fullReadAfterGroups || 1);
   ui.inputReviewPrevRepeat.value = String(s.reviewPrevRepeatCount || 1);
@@ -1219,6 +1600,7 @@ function renderSettings() {
   ui.checkUseOllama.checked = !!s.useOllama;
   ui.inputOllamaUrl.value = s.ollamaUrl || '';
   ui.inputOllamaModel.value = s.ollamaModel || '';
+  if (ui.checkReciteOnlyHighlights) ui.checkReciteOnlyHighlights.checked = !!s.reciteOnlyHighlights;
   updateManualCheckButton();
 }
 
@@ -1228,28 +1610,45 @@ function renderCurrentQaView() {
     ui.currentTitle.textContent = '未选择';
     ui.viewQuestion.textContent = '-';
     ui.viewAnswer.innerHTML = '';
+    if (ui.btnMarkLevel0) ui.btnMarkLevel0.disabled = true;
+    if (ui.btnMarkLevel1) ui.btnMarkLevel1.disabled = true;
+    if (ui.btnMarkLevel2) ui.btnMarkLevel2.disabled = true;
+    if (ui.reciteLevelStats) ui.reciteLevelStats.textContent = '0:0 1:0 2:0';
     renderQaTimer();
     return;
   }
 
   ui.currentTitle.textContent = qa.question || '（无问题）';
   ui.viewQuestion.textContent = qa.question || '-';
+  const canMark = !!listState.collectionId;
+  if (ui.btnMarkLevel0) ui.btnMarkLevel0.disabled = !canMark;
+  if (ui.btnMarkLevel1) ui.btnMarkLevel1.disabled = !canMark;
+  if (ui.btnMarkLevel2) ui.btnMarkLevel2.disabled = !canMark;
+  if (ui.reciteLevelStats) {
+    const counts = qa.reciteLevelCounts && typeof qa.reciteLevelCounts === 'object' ? qa.reciteLevelCounts : { 0: 0, 1: 0, 2: 0 };
+    const c0 = Number(counts[0] ?? counts['0'] ?? 0) || 0;
+    const c1 = Number(counts[1] ?? counts['1'] ?? 0) || 0;
+    const c2 = Number(counts[2] ?? counts['2'] ?? 0) || 0;
+    ui.reciteLevelStats.textContent = `0:${c0} 1:${c1} 2:${c2}`;
+  }
   startQaTimerForCurrent();
 
   const sentences = splitSentences(qa.answerText);
   const activeIdx = player.qaId === qa.id ? player.activeSentenceGlobalIndex : null;
   const threshold = clamp(Number(state.settings.threshold) || 0.65, 0, 1);
   const recited = ui.inputRecited.value || '';
+  const onlyHighlights = !!state?.settings?.reciteOnlyHighlights;
 
   // When not in recite-check mode, prefer rich formatting preview
-  const hasCheckState = !!recited.trim() || reciteCheck.maskMode || reciteCheck.lockedSegments.size;
+  // const hasCheckState = !!recited.trim() || reciteCheck.maskMode || reciteCheck.lockedSegments.size;
+  const hasCheckState = reciteCheck.maskMode || reciteCheck.lockedSegments.size || reciteCheck.manualAuto;
   if (!cardCheck.enabled && !player.running && !hasCheckState && qa.answerHtml) {
     const safe = sanitizeAnswerHtml(normalizeImportedHtml(qa.answerHtml));
-    ui.viewAnswer.innerHTML = `<div class="answer rich-answer">${safe || '<span class="muted">（无答案）</span>'}</div>`;
+    ui.viewAnswer.innerHTML = `<div class="answer rich-answer rich-answer-editable">${safe || '<span class="muted">（无答案）</span>'}</div>`;
     return;
   }
 
-  const { segments, bySentence } = buildSegments(sentences);
+  const { segments, bySentence } = getReciteSegmentsForQa(qa);
   const locked = reciteCheck.lockedSegments;
 
   if (cardCheck.enabled) {
@@ -1283,6 +1682,49 @@ function renderCurrentQaView() {
     ui.btnCardPrev.disabled = idx <= 0;
     ui.btnCardNext.disabled = idx >= sentences.length - 1;
     ui.btnCardFlip.disabled = !sentences.length;
+    return;
+  }
+
+  if (onlyHighlights && qa.answerHtml) {
+    const rawHtml = sanitizeAnswerHtml(normalizeImportedHtml(qa.answerHtml || ''));
+    const doc = new DOMParser().parseFromString(rawHtml || '', 'text/html');
+    let idx = 0;
+    Array.from(doc.body?.querySelectorAll('mark') || []).forEach((m) => {
+      const t = String(m.textContent || '').replace(/[\u00a0]/g, ' ').trim();
+      if (!t) return;
+      const isHit = locked.has(idx);
+      const masked = reciteCheck.maskMode && !maskState.showAll && !isHit;
+      const cls = ['sentence', 'segment', isHit ? 'hit' : '', masked ? 'masked' : ''].filter(Boolean).join(' ');
+
+      const wrap = doc.createElement('span');
+      wrap.setAttribute('class', cls);
+      wrap.setAttribute('data-hseg', String(idx));
+
+      const mk = doc.createElement('mark');
+      const c = m.getAttribute('data-color');
+      if (c) mk.setAttribute('data-color', c);
+      if (masked) mk.textContent = maskPlaceholder(t);
+      else mk.innerHTML = m.innerHTML;
+
+      wrap.appendChild(mk);
+      m.replaceWith(wrap);
+      idx++;
+    });
+
+    ui.viewAnswer.innerHTML = `<div class="answer rich-answer">${doc.body?.innerHTML || ''}</div>`;
+
+    ui.viewAnswer.querySelectorAll('[data-hseg]').forEach((node) => {
+      node.addEventListener('click', async () => {
+        const segIndex = Number(node.getAttribute('data-hseg'));
+        if (!Number.isFinite(segIndex)) return;
+        const seg = segments[segIndex];
+        if (!seg) return;
+        reciteCheck.lockedSegments.add(seg.globalIndex);
+        renderCurrentQaView();
+        await speak(seg.text);
+        updateMatches();
+      });
+    });
     return;
   }
 
@@ -1394,7 +1836,11 @@ function render() {
   updateCardButtons();
   renderCurrentQaView();
   renderSpeechAvailability();
-  renderStatus();
+  renderQaTimer();
+
+  if (ui.qaReciteWrap) {
+    ui.qaReciteWrap.classList.toggle('is-side-by-side', !!state?.settings?.qaReciteSideBySide);
+  }
 }
 
 function deleteSelectedQas() {
@@ -1446,6 +1892,8 @@ function applySettingsFromUI() {
   state.settings.ttsVoiceUri = String(ui.selectTtsVoice?.value || '').trim();
   state.settings.autoPlayNextQa = !!ui.checkAutoPlayNext.checked;
   state.settings.forceReciteCheck = !!ui.checkForceRecite?.checked;
+  state.settings.qaReciteSideBySide = !!ui.checkQaReciteSideBySide?.checked;
+  state.settings.reciteOnlyHighlights = !!ui.checkReciteOnlyHighlights?.checked;
   state.settings.fullReadBeforeGroups = clamp(parseInt(ui.inputFullReadBefore.value || '1', 10), 0, 5);
   state.settings.fullReadAfterGroups = clamp(parseInt(ui.inputFullReadAfter.value || '1', 10), 0, 5);
   state.settings.reviewPrevRepeatCount = clamp(parseInt(ui.inputReviewPrevRepeat.value || '1', 10), 1, 5);
@@ -1467,8 +1915,7 @@ function stopTts() {
 
 function isReciteCheckPassedForQa(qa) {
   if (!qa) return false;
-  const sentences = splitSentences(qa.answerText);
-  const { segments } = buildSegments(sentences);
+  const { segments } = getReciteSegmentsForQa(qa);
   if (!segments.length) return true;
   const hits = [...reciteCheck.lockedSegments].filter((i) => i >= 0 && i < segments.length).length;
   return hits >= segments.length;
@@ -1968,8 +2415,7 @@ function startRecording() {
     reciteCheck.maskMode = true;
     const qa = getCurrentQa();
     if (qa) {
-      const sentences = splitSentences(qa.answerText);
-      const { segments } = buildSegments(sentences);
+      const { segments } = getReciteSegmentsForQa(qa);
       advanceSegmentPointer(segments);
     }
     renderCurrentQaView();
@@ -1980,11 +2426,19 @@ function startRecording() {
 }
 
 function stopRecording() {
-  if (!recognition) return;
+  // if (!recognition) return;
+  // try {
+  //   recognition.stop();
+  //   ui.speechHint.textContent = '已停止录音。你可以继续编辑识别文本并检测。';
+  // } catch {}
+  const hadRecognition = !!recognition;
   try {
-    recognition.stop();
-    ui.speechHint.textContent = '已停止录音。你可以继续编辑识别文本并检测。';
+    if (recognition) recognition.stop();
+    ui.speechHint.textContent = hadRecognition ? '已停止录音。' : '已停止录音。';
   } catch {}
+  resetReciteCheck();
+  render();
+  updateMatches();
 }
 
 function advanceSegmentPointer(segments) {
@@ -2005,8 +2459,7 @@ function handleFinalUtterance(text) {
   const qa = getCurrentQa();
   if (!qa) return;
 
-  const sentences = splitSentences(qa.answerText);
-  const { segments, bySentence } = buildSegments(sentences);
+  const { segments, bySentence } = getReciteSegmentsForQa(qa);
   reciteCheck.pointerSegment = 0;
   advanceSegmentPointer(segments);
 
@@ -2050,14 +2503,26 @@ function handleFinalUtterance(text) {
 
 function computeMatch(qa, recitedText) {
   const threshold = clamp(Number(state.settings.threshold) || 0.65, 0, 1);
-  const sentences = splitSentences(qa.answerText);
+  const onlyHi = !!state?.settings?.reciteOnlyHighlights;
+  if (onlyHi && qa?.answerHtml) {
+    const parts = extractHighlightSegmentsFromAnswerHtml(qa.answerHtml);
+    const scores = parts.map((t) => diceSimilarity(recitedText, t));
+    const hits = scores.filter((x) => x >= threshold).length;
+    const total = parts.length;
+    const pct = total ? Math.round((hits / total) * 100) : 0;
+    const min = scores.length ? Math.min(...scores) : 0;
+    const max = scores.length ? Math.max(...scores) : 0;
+    return { threshold, hits, total, pct, min, max, mode: 'highlight' };
+  }
+
+  const sentences = splitSentences(qa?.answerText || '');
   const scores = sentences.map((s) => diceSimilarity(recitedText, s));
   const hits = scores.filter((x) => x >= threshold).length;
   const total = sentences.length;
   const pct = total ? Math.round((hits / total) * 100) : 0;
   const min = scores.length ? Math.min(...scores) : 0;
   const max = scores.length ? Math.max(...scores) : 0;
-  return { threshold, hits, total, pct, min, max };
+  return { threshold, hits, total, pct, min, max, mode: 'sentence' };
 }
 
 function updateMatches() {
@@ -2074,8 +2539,7 @@ function updateMatches() {
   }
 
   if (reciteCheck.lockedSegments.size || reciteCheck.maskMode) {
-    const sentences = splitSentences(qa.answerText);
-    const { segments, bySentence } = buildSegments(sentences);
+    const { segments, bySentence } = getReciteSegmentsForQa(qa);
 
     const segHits = [...reciteCheck.lockedSegments].filter((i) => i >= 0 && i < segments.length).length;
     const segTotal = segments.length;
@@ -2091,7 +2555,8 @@ function updateMatches() {
   }
 
   const m = computeMatch(qa, recited);
-  ui.matchSummary.textContent = `命中 ${m.hits}/${m.total} 句（${m.pct}%），阈值 ${m.threshold.toFixed(2)}，相似度范围 ${m.min.toFixed(2)}~${m.max.toFixed(2)}`;
+  const unit = m.mode === 'highlight' ? '段（高亮）' : '句';
+  ui.matchSummary.textContent = `命中 ${m.hits}/${m.total} ${unit}（${m.pct}%），阈值 ${m.threshold.toFixed(2)}，相似度范围 ${m.min.toFixed(2)}~${m.max.toFixed(2)}`;
   renderCurrentQaView();
 }
 
@@ -2099,8 +2564,7 @@ function runManualCheckFromText(raw, preserveAuto) {
   const qa = getCurrentQa();
   if (!qa) return;
   const threshold = clamp(Number(state.settings.threshold) || 0.65, 0, 1);
-  const sentences = splitSentences(qa.answerText);
-  const { segments } = buildSegments(sentences);
+  const { segments } = getReciteSegmentsForQa(qa);
 
   const prevAuto = reciteCheck.manualAuto;
   resetReciteCheck();
@@ -2241,14 +2705,154 @@ function parseDocxHtmlToQas(html) {
   return qas;
 }
 
+async function docxArrayBufferToHtml(buf) {
+  const JSZipLib = window.JSZip;
+  if (!JSZipLib) return '';
+
+  const zip = await JSZipLib.loadAsync(buf);
+  const docFile = zip.file('word/document.xml');
+  if (!docFile) return '';
+  const documentXml = await docFile.async('string');
+  if (!documentXml) return '';
+
+  const stylesFile = zip.file('word/styles.xml');
+  const stylesXml = stylesFile ? await stylesFile.async('string') : '';
+
+  const parseStyles = (xml) => {
+    const map = new Map();
+    if (!xml) return map;
+    const d = new DOMParser().parseFromString(String(xml), 'application/xml');
+    const styles = Array.from(d.getElementsByTagName('w:style') || []);
+    styles.forEach((s) => {
+      const type = s.getAttribute('w:type') || s.getAttribute('type');
+      if (type && String(type).toLowerCase() !== 'paragraph') return;
+      const id = s.getAttribute('w:styleId') || s.getAttribute('styleId');
+      if (!id) return;
+      const n = s.getElementsByTagName('w:name')?.[0];
+      const name = n?.getAttribute('w:val') || n?.getAttribute('val') || '';
+      if (name) map.set(String(id), String(name));
+    });
+    return map;
+  };
+
+  const styleMap = parseStyles(stylesXml);
+
+  const getLocal = (node) => String(node?.tagName || '').split(':').pop().toLowerCase();
+
+  const highlightToColor = (val) => {
+    const v = String(val || '').toLowerCase();
+    if (!v || v === 'none') return '';
+    if (v.includes('yellow')) return 'yellow';
+    if (v.includes('green')) return 'green';
+    if (v.includes('cyan') || v.includes('blue')) return 'cyan';
+    if (v.includes('magenta') || v.includes('red') || v.includes('pink')) return 'magenta';
+    if (v.includes('darkcyan') || v.includes('darkblue')) return 'cyan';
+    if (v.includes('darkgreen')) return 'green';
+    if (v.includes('darkmagenta') || v.includes('darkred')) return 'magenta';
+    if (v.includes('darkyellow')) return 'yellow';
+    return 'yellow';
+  };
+
+  const getHeadingLevel = (styleId) => {
+    const sid = String(styleId || '');
+    const name = styleMap.get(sid) || '';
+    const s = `${sid} ${name}`.toLowerCase();
+    const m1 = s.match(/heading\s*([1-6])/i);
+    if (m1) return Number(m1[1]);
+    const m2 = s.match(/标题\s*([1-6])/i);
+    if (m2) return Number(m2[1]);
+    const m3 = s.match(/heading([1-6])/i);
+    if (m3) return Number(m3[1]);
+    return 0;
+  };
+
+  const buildPlainText = (p) => {
+    const ts = Array.from(p.getElementsByTagName('w:t') || []);
+    return ts.map((x) => x.textContent || '').join('');
+  };
+
+  const buildRichHtml = (p) => {
+    const out = [];
+
+    const handleRun = (r) => {
+      const rPr = r.getElementsByTagName('w:rPr')?.[0];
+      const bold = !!(rPr && (rPr.getElementsByTagName('w:b')?.[0] || rPr.getElementsByTagName('w:bCs')?.[0]));
+      const hl = rPr?.getElementsByTagName('w:highlight')?.[0];
+      const hlVal = hl ? (hl.getAttribute('w:val') || hl.getAttribute('val')) : '';
+      const color = highlightToColor(hlVal);
+
+      const parts = [];
+      Array.from(r.childNodes || []).forEach((c) => {
+        const l = getLocal(c);
+        if (l === 't') {
+          const t = c.textContent || '';
+          if (t) parts.push(escapeHtml(t));
+        } else if (l === 'tab') {
+          parts.push('    ');
+        } else if (l === 'br' || l === 'cr') {
+          parts.push('<br>');
+        }
+      });
+
+      const inner = parts.join('');
+      if (!inner) return;
+
+      let wrapped = inner;
+      if (bold) wrapped = `<strong>${wrapped}</strong>`;
+      if (color) wrapped = `<mark data-color="${color}">${wrapped}</mark>`;
+      out.push(wrapped);
+    };
+
+    const walk = (node) => {
+      const l = getLocal(node);
+      if (l === 'r') return handleRun(node);
+      Array.from(node.childNodes || []).forEach((c) => walk(c));
+    };
+
+    walk(p);
+    return out.join('');
+  };
+
+  const xmlDoc = new DOMParser().parseFromString(String(documentXml), 'application/xml');
+  const ps = Array.from(xmlDoc.getElementsByTagName('w:p') || []);
+  if (!ps.length) return '';
+
+  const blocks = [];
+  ps.forEach((p) => {
+    const pStyle = p.getElementsByTagName('w:pStyle')?.[0];
+    const styleId = pStyle ? (pStyle.getAttribute('w:val') || pStyle.getAttribute('val')) : '';
+    const level = getHeadingLevel(styleId);
+    if (level) {
+      const text = buildPlainText(p).replace(/[\u00a0]/g, ' ').trim();
+      if (text) blocks.push(`<h${level}>${escapeHtml(text)}</h${level}>`);
+      return;
+    }
+
+    const rich = buildRichHtml(p).trim();
+    const plain = buildPlainText(p).replace(/[\u00a0]/g, ' ').trim();
+    if (!rich && !plain) return;
+    blocks.push(`<p>${rich || escapeHtml(plain)}</p>`);
+  });
+
+  return blocks.join('');
+}
+
 async function importDocx(file) {
   if (!window.mammoth) {
     alert('docx 导入需要联网加载 mammoth 库（CDN）。');
     return;
   }
   const buf = await file.arrayBuffer();
-  const result = await window.mammoth.convertToHtml({ arrayBuffer: buf });
-  const html = result?.value || '';
+  let html = '';
+  try {
+    html = (await docxArrayBufferToHtml(buf)) || '';
+  } catch {
+    html = '';
+  }
+  if (!html) {
+    const result = await window.mammoth.convertToHtml({ arrayBuffer: buf });
+    html = result?.value || '';
+  }
   const qas = parseDocxHtmlToQas(html);
   if (!qas.length) {
     const text = stripHtmlToText(html);
@@ -2368,175 +2972,202 @@ async function exportDocx() {
     return;
   }
 
-  const { Document, Packer, Paragraph, HeadingLevel, TextRun } = window.docx;
+  try {
+    const { Document, Packer, Paragraph, HeadingLevel, TextRun, HighlightColor } = window.docx;
 
-  const htmlParagraphsToDocxParas = (answerHtml, fallbackText) => {
-    const out = [];
+    const htmlParagraphsToDocxParas = (answerHtml, fallbackText) => {
+      const out = [];
+      const fallback = String(fallbackText || '').replace(/\r\n/g, '\n').trim();
+
+    // Prefer rich HTML whenever possible (to preserve paragraphs/bold/highlight)
     const rawHtml = sanitizeAnswerHtml(normalizeImportedHtml(answerHtml || ''));
-    const htmlText = stripHtmlToText(rawHtml || '');
-    const fallback = String(fallbackText || '').replace(/\r\n/g, '\n').trim();
-    // If HTML is effectively empty, fall back to plain text to avoid blank exports.
-    if (!htmlText && fallback) {
+    const htmlText = String(stripHtmlToText(rawHtml || '') || '').trim();
+
+    // Only fall back to plain text when HTML is effectively empty.
+    if (!htmlText) {
+      if (!fallback) return [new Paragraph({ text: '' })];
       const paras = fallback
-        .split(/\n{2,}/g)
-        .map((p) => p.replace(/\n+/g, ' ').trim())
-        .filter(Boolean);
-      return paras.length
-        ? paras.map((p) => new Paragraph({ children: [new TextRun({ text: p })] }))
-        : [new Paragraph({ text: '' })];
-    }
-    const doc = new DOMParser().parseFromString(rawHtml || '', 'text/html');
-    const body = doc.body;
-    if (!body || !body.childNodes.length) {
-      const bodyText = String(fallbackText || '').replace(/\r\n/g, '\n');
-      const paras = bodyText
-        .split(/\n{2,}/g)
-        .map((p) => p.replace(/\n+/g, ' ').trim())
+        .split(/\n+/g)
+        .map((p) => p.trim())
         .filter(Boolean);
       return paras.length
         ? paras.map((p) => new Paragraph({ children: [new TextRun({ text: p })] }))
         : [new Paragraph({ text: '' })];
     }
 
-    const makeRunsFromNode = (node, ctx) => {
-      const runs = [];
+      const mapColor = (c) => {
+        const v = String(c || '').toLowerCase();
+        if (v === 'green') return HighlightColor?.GREEN || 'green';
+        if (v === 'cyan') return HighlightColor?.CYAN || 'cyan';
+        if (v === 'magenta') return HighlightColor?.MAGENTA || 'magenta';
+        if (v === 'yellow') return HighlightColor?.YELLOW || 'yellow';
+        return HighlightColor?.YELLOW || 'yellow';
+      };
+
+      const makeTextRun = (text, style) => {
+        const opts = { text: String(text || '') };
+        if (style?.bold) opts.bold = true;
+        if (style?.highlight) opts.highlight = mapColor(style.highlightColor);
+        return new TextRun(opts);
+      };
+
+    // Convert a node to multiple paragraphs; split on <br> to avoid collapsing into one big paragraph.
+    const nodeToParagraphRunsList = (node, ctx) => {
+      const paras = [];
+      let cur = [];
+      let curHasText = false;
+
+      const pushCur = () => {
+        paras.push(curHasText ? cur : [new TextRun({ text: '' })]);
+        cur = [];
+        curHasText = false;
+      };
+
       const walk = (n, style) => {
         if (!n) return;
         if (n.nodeType === Node.TEXT_NODE) {
           const t = String(n.nodeValue || '');
           if (t) {
-            runs.push(
-              new TextRun({
-                text: t,
-                bold: !!style.bold,
-                highlight: style.highlight ? 'yellow' : undefined,
-              })
-            );
+            if (t.trim()) curHasText = true;
+            cur.push(makeTextRun(t, style));
           }
           return;
         }
         if (n.nodeType !== Node.ELEMENT_NODE) return;
         const tag = (n.tagName || '').toUpperCase();
         if (tag === 'BR') {
-          runs.push(new TextRun({ text: '', break: 1 }));
+          pushCur();
           return;
         }
         const next = { ...style };
         if (tag === 'STRONG' || tag === 'B') next.bold = true;
-        if (tag === 'MARK') next.highlight = true;
+        if (tag === 'MARK') {
+          next.highlight = true;
+          const c = String(n.getAttribute?.('data-color') || '').toLowerCase();
+          next.highlightColor = c || next.highlightColor;
+        }
         Array.from(n.childNodes || []).forEach((c) => walk(c, next));
       };
+
       walk(node, ctx || { bold: false, highlight: false });
-      return runs;
+      // flush remaining
+      if (cur.length || curHasText) pushCur();
+      return paras;
     };
 
-    const blocks = [];
-    // Prefer <p>/<div>, fallback to body text
-    const ps = Array.from(body.querySelectorAll('p,div'));
-    if (ps.length) {
-      ps.forEach((p) => blocks.push(p));
-    } else {
-      blocks.push(body);
+    // Only use TOP-LEVEL blocks to avoid duplicating nested <div>/<p> and collapsing formatting.
+    const doc = new DOMParser().parseFromString(rawHtml || '', 'text/html');
+    const body = doc.body;
+    if (!body || !body.childNodes.length) {
+      return [new Paragraph({ text: '' })];
     }
 
-    blocks.forEach((b) => {
-      const runs = makeRunsFromNode(b, { bold: false, highlight: false });
-      const hasAny = runs.length > 0;
-      out.push(new Paragraph({ children: hasAny ? runs : [new TextRun({ text: '' })] }));
+    const blocks = Array.from(body.children || []).filter((n) => {
+      const t = (n.tagName || '').toUpperCase();
+      return t === 'P' || t === 'DIV';
+    });
+    const topBlocks = blocks.length ? blocks : [body];
+
+    topBlocks.forEach((b, idx) => {
+      const runsList = nodeToParagraphRunsList(b, { bold: false, highlight: false });
+      runsList.forEach((runs) => out.push(new Paragraph({ children: runs })));
+      // Keep an empty line between top-level blocks (similar to blank line between paragraphs)
+      if (idx !== topBlocks.length - 1) out.push(new Paragraph({ text: '' }));
     });
 
-    const anyText = out.some((p) => {
-      const kids = p?.options?.children || [];
-      return kids.some((k) => String(k?.options?.text || '').trim());
-    });
+    const anyText = htmlText.length > 0;
 
     if (!anyText && fallback) {
       const paras = fallback
-        .split(/\n{2,}/g)
-        .map((p) => p.replace(/\n+/g, ' ').trim())
+        .split(/\n+/g)
+        .map((p) => p.trim())
         .filter(Boolean);
       return paras.length
         ? paras.map((p) => new Paragraph({ children: [new TextRun({ text: p })] }))
         : [new Paragraph({ text: '' })];
     }
 
-    return out.length ? out : [new Paragraph({ text: '' })];
-  };
+      return out.length ? out : [new Paragraph({ text: '' })];
+    };
 
-  const children = [];
+    const children = [];
 
-  ensureCollections();
-  const qas = Array.isArray(state.qas) ? state.qas : [];
-  const exportColId = listState.collectionId || state.progress?.currentCollectionId || null;
-  if (!exportColId) {
-    alert('请先进入某个合集（点进合集后再导出）。');
-    return;
-  }
+    ensureCollections();
+    const qas = Array.isArray(state.qas) ? state.qas : [];
+    const exportColId = listState.collectionId || state.progress?.currentCollectionId || null;
+    if (!exportColId) {
+      alert('请先进入某个合集（点进合集后再导出）。');
+      return;
+    }
 
-  const col = (Array.isArray(state.collections) ? state.collections : []).find((c) => c.id === exportColId);
-  if (!col) {
-    alert('当前合集不存在或已被删除，请刷新后重试。');
-    return;
-  }
+    const col = (Array.isArray(state.collections) ? state.collections : []).find((c) => c.id === exportColId);
+    if (!col) {
+      alert('当前合集不存在或已被删除，请刷新后重试。');
+      return;
+    }
 
-  const cols = [col];
-  cols.forEach((col, ci) => {
-    const colName = String(col?.name || '（未命名合集）');
-    children.push(
-      new Paragraph({
-        text: colName,
-        heading: HeadingLevel.HEADING_1,
-      })
-    );
-
-    const inCol = qas.filter((q) => (q.collectionId || DEFAULT_COLLECTION_ID) === col.id);
-    inCol.forEach((qa, qi) => {
-      const title = (qa.question || '').trim() || '（无标题）';
+    const cols = [col];
+    cols.forEach((col, ci) => {
+      const colName = String(col?.name || '（未命名合集）');
       children.push(
         new Paragraph({
-          text: title,
-          heading: HeadingLevel.HEADING_2,
+          text: colName,
+          heading: HeadingLevel.HEADING_1,
         })
       );
 
-      const paras = htmlParagraphsToDocxParas(qa.answerHtml, qa.answerText);
-      paras.forEach((p) => children.push(p));
-
-      const fp = String(qa.focusPoints || '').trim();
-      if (fp) {
+      const inCol = qas.filter((q) => (q.collectionId || DEFAULT_COLLECTION_ID) === col.id);
+      inCol.forEach((qa, qi) => {
+        const title = (qa.question || '').trim() || '（无标题）';
         children.push(
           new Paragraph({
-            text: '背诵需关注的点',
-            heading: HeadingLevel.HEADING_3,
+            text: title,
+            heading: HeadingLevel.HEADING_2,
           })
         );
-        fp
-          .split(/\n+/g)
-          .map((x) => x.trim())
-          .filter(Boolean)
-          .forEach((line) => {
-            children.push(new Paragraph({ children: [new TextRun({ text: line })] }));
-          });
-      }
 
-      if (qi !== inCol.length - 1) children.push(new Paragraph({ text: '' }));
+        const paras = htmlParagraphsToDocxParas(qa.answerHtml, qa.answerText);
+        paras.forEach((p) => children.push(p));
+
+        const fp = String(qa.focusPoints || '').trim();
+        if (fp) {
+          children.push(
+            new Paragraph({
+              text: '背诵需关注的点',
+              heading: HeadingLevel.HEADING_3,
+            })
+          );
+          fp
+            .split(/\n+/g)
+            .map((x) => x.trim())
+            .filter(Boolean)
+            .forEach((line) => {
+              children.push(new Paragraph({ children: [new TextRun({ text: line })] }));
+            });
+        }
+
+        if (qi !== inCol.length - 1) children.push(new Paragraph({ text: '' }));
+      });
+
+      if (ci !== cols.length - 1) children.push(new Paragraph({ text: '' }));
     });
 
-    if (ci !== cols.length - 1) children.push(new Paragraph({ text: '' }));
-  });
-
-  const doc = new Document({
-    sections: [
-      {
-        properties: {},
-        children,
-      },
-    ],
-  });
+    const doc = new Document({
+      sections: [
+        {
+          properties: {},
+          children,
+        },
+      ],
+    });
 
   const blob = await Packer.toBlob(doc);
-  const safeName = String(col?.name || 'collection').replace(/[\\/:*?"<>|]/g, '_');
-  downloadBlob(`recite-${safeName}-${Date.now()}.docx`, blob);
+  const name = `${String(col?.name || 'recite').replace(/[\\/:*?"<>|]/g, '_')}.docx`;
+  download(name, blob);
+  } catch (e) {
+    console.error(e);
+    alert(`DOCX 导出失败：${e?.message || e}`);
+  }
 }
 
 function importData(file) {
@@ -2638,6 +3269,20 @@ ui.btnApplySettings.addEventListener('click', () => {
   updateMatches();
 });
 
+ui.checkQaReciteSideBySide?.addEventListener('change', () => {
+  state.settings.qaReciteSideBySide = !!ui.checkQaReciteSideBySide.checked;
+  saveState();
+  render();
+});
+
+ui.checkReciteOnlyHighlights?.addEventListener('change', () => {
+  state.settings.reciteOnlyHighlights = !!ui.checkReciteOnlyHighlights.checked;
+  saveState();
+  resetReciteCheck();
+  render();
+  updateMatches();
+});
+
 ui.inputQaSearch.addEventListener('input', () => {
   listState.query = ui.inputQaSearch.value || '';
   listState.page = 1;
@@ -2698,6 +3343,10 @@ ui.btnStop.addEventListener('click', () => stopPlayer());
 ui.btnPrev.addEventListener('click', () => gotoPrevQa());
 ui.btnNext.addEventListener('click', () => gotoNextQa());
 
+ui.btnMarkLevel0?.addEventListener('click', () => markCurrentQaToReciteLevel(0));
+ui.btnMarkLevel1?.addEventListener('click', () => markCurrentQaToReciteLevel(1));
+ui.btnMarkLevel2?.addEventListener('click', () => markCurrentQaToReciteLevel(2));
+
 ui.btnRecStart.addEventListener('click', () => startRecording());
 ui.btnRecStop.addEventListener('click', () => stopRecording());
 let _autoManualCheckTimer = null;
@@ -2719,6 +3368,11 @@ ui.btnCheck.addEventListener('click', () => {
     ui.speechHint.textContent = '已关闭自动输入检测。';
     updateMatches();
   }
+});
+
+ui.btnRepairMaskPlaceholder?.addEventListener('click', () => {
+  stopPlayer();
+  repairMaskPlaceholderForCurrentQa();
 });
 
 ui.inputRecited.addEventListener('input', () => {
@@ -2754,6 +3408,52 @@ ui.btnCardFlip.addEventListener('click', () => {
 ui.btnMaskToggleAll.addEventListener('click', () => {
   maskState.showAll = !maskState.showAll;
   render();
+});
+
+// Floating answer highlight palette
+ui.ansMarkPalette?.addEventListener('mousedown', (e) => {
+  // Avoid selection collapse before click is handled
+  e.preventDefault();
+});
+
+ui.ansMarkPalette?.addEventListener('click', (e) => {
+  const t = e.target;
+  if (!t || !t.getAttribute) return;
+  const action = t.getAttribute('data-action');
+  const color = t.getAttribute('data-color');
+  if (action === 'clear') {
+    clearAnswerHighlights();
+    hideAnsMarkPalette();
+    return;
+  }
+  if (color) {
+    applyAnswerHighlight(color);
+    hideAnsMarkPalette();
+  }
+});
+
+document.addEventListener('selectionchange', () => {
+  // Delay to allow selection to settle
+  setTimeout(() => showAnsMarkPaletteNearSelection(), 0);
+});
+
+document.addEventListener('mousedown', (e) => {
+  if (!ui.ansMarkPalette) return;
+  if (ui.ansMarkPalette.style.display === 'none') return;
+  const t = e.target;
+  if (t && ui.ansMarkPalette.contains(t)) return;
+  hideAnsMarkPalette();
+});
+
+window.addEventListener('scroll', () => {
+  // Keep palette near selection when scrolling
+  if (!ui.ansMarkPalette || ui.ansMarkPalette.style.display === 'none') return;
+  showAnsMarkPaletteNearSelection();
+}, true);
+
+window.addEventListener('resize', () => {
+  if (!ui.ansMarkPalette || ui.ansMarkPalette.style.display === 'none') return;
+  showAnsMarkPaletteNearSelection();
 });
 
 ui.btnAsk.addEventListener('click', () => ask());
