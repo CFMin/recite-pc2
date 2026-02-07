@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Recite</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">Recite</div>
+        <div class="topbar-actions">
+          <div id="qaTimer" class="qa-timer">00:00</div>
+          <button id="btnQaTimerPause" class="btn btn-secondary btn-mini">计时暂停</button>
+          <button id="btnExport" class="btn btn-secondary">导出</button>
+          <button id="btnExportDocx" class="btn btn-secondary">导出DOCX</button>
+          <label class="btn btn-secondary file-label">
+            导入
+            <input id="fileImport" type="file" accept="application/json,.docx" />
+          </label>
+        </div>
+      </header>
+
+      <main class="layout">
+        <aside class="sidebar">
+          <div class="section-title">QA 列表</div>
+
+          <div class="list-toolbar">
+            <div class="toolbar-row">
+              <button id="btnCollectionBack" class="btn btn-secondary btn-mini" disabled>返回</button>
+              <div id="collectionTitle" class="page-info">合集</div>
+              <div style="width:1px"></div>
+            </div>
+            <input id="inputQaSearch" class="input input-compact" placeholder="搜索问题/答案" />
+            <div class="toolbar-row">
+              <label class="check">
+                <input id="checkSelectAll" type="checkbox" />
+                <span>全选</span>
+              </label>
+              <button id="btnDeleteCollectionAll" class="btn btn-danger btn-mini">删除本合集</button>
+              <button id="btnDeleteSelected" class="btn btn-danger btn-mini">删除选中</button>
+              <button id="btnClearSelection" class="btn btn-secondary btn-mini">清空选择</button>
+              <button id="btnDeleteAll" class="btn btn-danger btn-mini">删除全部</button>
+            </div>
+            <div class="toolbar-row">
+              <button id="btnPagePrev" class="btn btn-secondary btn-mini">上一页</button>
+              <div id="pageInfo" class="page-info">第 1/1 页</div>
+              <button id="btnPageNext" class="btn btn-secondary btn-mini">下一页</button>
+            </div>
+          </div>
+
+          <div id="qaList" class="qa-list"></div>
+
+          <div class="divider"></div>
+
+          <div class="section-title">新建 / 编辑</div>
+          <div class="form">
+            <label class="field">
+              <div class="label">问题</div>
+              <input id="inputQuestion" class="input" placeholder="输入要背诵的问题" />
+            </label>
+            <label class="field">
+              <div class="label">答案（可多句话）</div>
+              <div class="rt-toolbar">
+                <button id="btnAnswerBold" type="button" class="btn btn-secondary btn-mini">加粗</button>
+                <button id="btnAnswerHighlight" type="button" class="btn btn-secondary btn-mini">高亮</button>
+                <button id="btnAnswerClearFormat" type="button" class="btn btn-secondary btn-mini">清除格式</button>
+              </div>
+              <div id="inputAnswerRich" class="textarea rich-editor" contenteditable="true" spellcheck="false" data-placeholder="输入答案内容，系统会自动按标点切句"></div>
+              <textarea id="inputAnswer" class="textarea" rows="8" placeholder="输入答案内容，系统会自动按标点切句" style="display:none"></textarea>
+            </label>
+            <div class="row">
+              <button id="btnSave" class="btn btn-primary">保存</button>
+              <button id="btnNew" class="btn btn-secondary">新建</button>
+              <button id="btnDelete" class="btn btn-danger">删除</button>
+            </div>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="section-title">规则设置</div>
+          <div class="form">
+            <div class="grid">
+              <label class="field">
+                <div class="label">每组句子数</div>
+                <input id="inputGroupSize" type="number" min="1" max="10" class="input" />
+              </label>
+              <label class="field">
+                <div class="label">每组重复次数</div>
+                <input id="inputRepeat" type="number" min="1" max="20" class="input" />
+              </label>
+            </div>
+
+            <label class="field">
+              <div class="label">断句标点（用于“句子”判定）</div>
+              <input id="inputSentenceDelims" type="text" class="input" placeholder="例如：。！？!?；，" />
+            </label>
+
+            <label class="check">
+              <input id="checkReviewPrev" type="checkbox" />
+              <span>完成当前 QA 后回顾上一对 QA</span>
+            </label>
+
+            <label class="field">
+              <div class="label">回顾上一题重复遍数</div>
+              <input id="inputReviewPrevRepeat" type="number" min="1" max="5" class="input" />
+            </label>
+
+            <label class="check">
+              <input id="checkTts" type="checkbox" />
+              <span>朗读文字（TTS）</span>
+            </label>
+
+            <label class="field">
+              <div class="label">TTS 发音人</div>
+              <select id="selectTtsVoice" class="input"></select>
+            </label>
+
+            <label class="check">
+              <input id="checkAutoPlayNext" type="checkbox" />
+              <span>顺序连续播放下一题</span>
+            </label>
+
+            <label class="check">
+              <input id="checkForceRecite" type="checkbox" />
+              <span>强制背诵检查：未通过检查不允许进入下一题（需手动点击下一题）</span>
+            </label>
+
+            <div class="grid">
+              <label class="field">
+                <div class="label">分组前完整朗读遍数</div>
+                <input id="inputFullReadBefore" type="number" min="0" max="5" class="input" />
+              </label>
+              <label class="field">
+                <div class="label">分组后完整朗读遍数</div>
+                <input id="inputFullReadAfter" type="number" min="0" max="5" class="input" />
+              </label>
+            </div>
+
+            <div class="grid">
+              <label class="field">
+                <div class="label">语速</div>
+                <input id="inputRate" type="number" min="0.5" max="4" step="0.1" class="input" />
+              </label>
+              <label class="field">
+                <div class="label">音量</div>
+                <input id="inputVolume" type="number" min="0" max="1" step="0.1" class="input" />
+              </label>
+            </div>
+
+            <label class="field">
+              <div class="label">背出命中阈值（0-1）</div>
+              <input id="inputThreshold" type="number" min="0" max="1" step="0.05" class="input" />
+            </label>
+
+            <button id="btnApplySettings" class="btn btn-secondary">应用设置</button>
+          </div>
+        </aside>
+
+        <section class="content">
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <div class="muted">当前 QA</div>
+                <div id="currentTitle" class="title">未选择</div>
+                <div id="currentQaTimer" class="qa-timer-inline">00:00</div>
+              </div>
+              <div class="player-actions">
+                <button id="btnStart" class="btn btn-primary">开始</button>
+                <button id="btnPause" class="btn btn-secondary">暂停</button>
+                <button id="btnStop" class="btn btn-secondary">停止</button>
+                <button id="btnTtsTest" class="btn btn-secondary">测试朗读</button>
+                <button id="btnPrev" class="btn btn-secondary">上一个</button>
+                <button id="btnNext" class="btn btn-secondary">下一个</button>
+              </div>
+            </div>
+
+            <div class="status" id="statusLine">请选择一个 QA，然后点击开始。</div>
+
+            <div class="qa-view">
+              <div class="qa-block">
+                <div class="block-title">问题</div>
+                <div id="viewQuestion" class="block-body">-</div>
+              </div>
+              <div class="qa-block">
+                <div class="block-title-row">
+                  <div class="block-title">答案</div>
+                  <div class="mini-actions">
+                    <button id="btnCardMode" class="btn btn-secondary btn-mini">卡片检查：关</button>
+                    <button id="btnCardPrev" class="btn btn-secondary btn-mini">上一句</button>
+                    <button id="btnCardFlip" class="btn btn-secondary btn-mini">翻面</button>
+                    <button id="btnCardNext" class="btn btn-secondary btn-mini">下一句</button>
+                    <button id="btnMaskToggleAll" class="btn btn-secondary btn-mini">全部显示</button>
+                  </div>
+                </div>
+                <div id="viewAnswer" class="answer"></div>
+              </div>
+              <div class="qa-block">
+                <div class="block-title">背诵需关注的点</div>
+                <textarea id="inputFocusPoints" class="textarea" rows="3" placeholder="例如：概念没说全/关键公式/易混淆点…"></textarea>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <div class="muted">最后一遍背出检测</div>
+                <div class="title">说出来或输入，系统会高亮你命中的句子</div>
+              </div>
+              <div class="player-actions">
+                <button id="btnRecStart" class="btn btn-primary">开始录音</button>
+                <button id="btnRecStop" class="btn btn-secondary">停止录音</button>
+                <button id="btnCheck" class="btn btn-secondary">用输入检测</button>
+              </div>
+            </div>
+
+            <div class="grid-2">
+              <div>
+                <div class="muted">识别/输入内容</div>
+                <textarea id="inputRecited" class="textarea" rows="5" placeholder="你说的话会显示在这里，也可以手动输入"></textarea>
+              </div>
+              <div>
+                <div class="muted">命中结果</div>
+                <div id="matchSummary" class="summary">-</div>
+              </div>
+            </div>
+            <div id="speechHint" class="hint"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <div class="muted">随时提问（免费离线模式）</div>
+                <div class="title">对当前答案内容有疑问，输入问题</div>
+              </div>
+              <div class="player-actions">
+                <button id="btnAsk" class="btn btn-secondary">提问</button>
+              </div>
+            </div>
+            <input id="inputAsk" class="input" placeholder="例如：这句话的含义是什么？" />
+            <div id="askAnswer" class="assistant"></div>
+
+            <div class="divider"></div>
+            <div class="muted">可选：本地大模型（Ollama）</div>
+            <div class="grid">
+              <label class="field">
+                <div class="label">Ollama 地址</div>
+                <input id="inputOllamaUrl" class="input" placeholder="http://localhost:11434" />
+              </label>
+              <label class="field">
+                <div class="label">模型</div>
+                <input id="inputOllamaModel" class="input" placeholder="qwen2.5:3b" />
+              </label>
+            </div>
+            <label class="check">
+              <input id="checkUseOllama" type="checkbox" />
+              <span>优先使用 Ollama（失败则自动回退离线）</span>
+            </label>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="https://unpkg.com/docx@8.2.4/build/index.umd.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mammoth@1.6.0/mammoth.browser.min.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>
