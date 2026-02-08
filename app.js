@@ -936,10 +936,13 @@ function showAnsMarkPaletteNearSelection() {
   ui.ansMarkPalette.style.display = prev || 'none';
 
   const pad = 8;
-  let top = rect.top - ph - pad;
-  if (top < 8) top = rect.bottom + pad;
+  // Prefer showing palette below the selection
+  let top = rect.bottom + pad;
+  let left = rect.left + rect.width / 2 - pw / 2;
 
-  let left = rect.right - pw;
+  // If it would overflow the viewport bottom, fallback to above selection
+  if (top + ph > window.innerHeight - 8) top = rect.top - ph - pad;
+  if (top < 8) top = 8;
   if (left < 8) left = rect.left;
   if (left + pw > window.innerWidth - 8) left = window.innerWidth - pw - 8;
 
