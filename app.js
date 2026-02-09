@@ -227,6 +227,7 @@ function deleteCurrentCollectionQas() {
   const toDelete = new Set(state.qas.filter((q) => (q.collectionId || DEFAULT_COLLECTION_ID) === colId).map((q) => q.id));
   state.qas = state.qas.filter((q) => !toDelete.has(q.id));
   listState.selected.clear();
+  listState.selectedCollections.delete(colId);
   listState.page = 1;
 
   if (state.progress.currentQaId && toDelete.has(state.progress.currentQaId)) {
@@ -278,6 +279,7 @@ function deleteCollectionById(colId) {
   }
 
   listState.selected.clear();
+  listState.selectedCollections.delete(colId);
   listState.page = 1;
   saveState();
   resetReciteCheck();
@@ -299,6 +301,7 @@ function deleteAllQas() {
   state.progress.currentCollectionId = null;
   listState.collectionId = null;
   listState.selected.clear();
+  listState.selectedCollections.clear();
   listState.query = '';
   ui.inputQaSearch.value = '';
   listState.page = 1;
@@ -632,6 +635,36 @@ function isTypingTarget(node) {
   return false;
 }
 
+function speakText(text) {
+  const t = String(text || '').trim();
+  if (!t) return;
+  const synth = window.speechSynthesis;
+  if (!synth) return;
+  try { synth.cancel(); } catch {}
+  const u = new SpeechSynthesisUtterance(t);
+  u.lang = 'zh-CN';
+  try { synth.speak(u); } catch {}
+}
+
+function getSelectionTextIn(container) {
+  try {
+    const sel = window.getSelection?.();
+    if (!sel || sel.rangeCount === 0) return '';
+    const s = String(sel.toString() || '').replace(/[\u00a0]/g, ' ').trim();
+    if (!s) return '';
+
+    const range = sel.getRangeAt(0);
+    const c = range.commonAncestorContainer;
+    const node = c && c.nodeType === Node.ELEMENT_NODE ? c : c?.parentElement;
+    if (!node || !container.contains(node)) return '';
+    if (isTypingTarget(node)) return '';
+    if (ui.ansMarkPalette && ui.ansMarkPalette.contains(node)) return '';
+    return s;
+  } catch {
+    return '';
+  }
+}
+
 function normalizeImportedHtml(html) {
   const doc = new DOMParser().parseFromString(String(html || ''), 'text/html');
   const body = doc.body;
@@ -816,8 +849,8 @@ const ui = {
   btnDeleteAll: el('btnDeleteAll'),
   btnCollectionBack: el('btnCollectionBack'),
   collectionTitle: el('collectionTitle'),
-  btnPagePrev: el('btnPagePrev'),
   pageInfo: el('pageInfo'),
+  btnPagePrev: el('btnPagePrev'),
   btnPageNext: el('btnPageNext'),
   inputQuestion: el('inputQuestion'),
   inputAnswer: el('inputAnswer'),
@@ -898,6 +931,8 @@ const ui = {
   btnExport: el('btnExport'),
   btnExportDocx: el('btnExportDocx'),
   fileImport: el('fileImport'),
+  btnExportDocxAll: el('btnExportDocxAll'),
+  fileImportDocxAll: el('fileImportDocxAll'),
 
   qaTimer: el('qaTimer'),
   currentQaTimer: el('currentQaTimer'),
@@ -1342,6 +1377,7 @@ let listState = {
   page: 1,
   query: '',
   selected: new Set(),
+  selectedCollections: new Set(),
   collectionId: state.progress?.currentCollectionId || null,
 };
 
@@ -1353,6 +1389,7 @@ function getCurrentQa() {
   return getQaById(state.progress.currentQaId);
 }
 
+// ... (rest of the code remains the same)
 
 function getFilteredQas() {
   const q = (listState.query || '').trim().toLowerCase();
@@ -1378,12 +1415,18 @@ function setActiveCollection(id) {
   listState.collectionId = id;
   listState.page = 1;
   listState.selected.clear();
+  listState.selectedCollections.clear();
   ui.checkSelectAll.checked = false;
   ui.checkSelectAll.indeterminate = false;
   if (!state.progress) state.progress = { currentQaId: null, currentCollectionId: null };
   state.progress.currentCollectionId = id;
   saveState();
   render();
+}
+
+function updateSelectAllCollectionsState() {
+  if (!ui.btnExportDocxAll) return;
+  ui.btnExportDocxAll.disabled = listState.selectedCollections.size === 0;
 }
 
 ui.btnCollectionBack?.addEventListener('click', () => {
@@ -1395,6 +1438,10 @@ ui.btnCollectionBack?.addEventListener('click', () => {
 function normalizeImportedCollectionName(filename) {
   const base = String(filename || '').trim() || '导入';
   return base.replace(/\.(json|docx)$/i, '');
+}
+
+function normalizeNameKey(name) {
+  return String(name || '').replace(/[\u00a0]/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
 function createCollection(name) {
@@ -1459,13 +1506,17 @@ function renderQaList() {
     ui.btnDeleteSelected.disabled = true;
     ui.btnClearSelection.disabled = true;
 
+    if (ui.btnExportDocxAll) ui.btnExportDocxAll.disabled = listState.selectedCollections.size === 0;
+
     ui.qaList.innerHTML = cols
       .map((c) => {
         const n = counts.get(c.id) || 0;
         const disableDel = PROTECTED_COLLECTION_IDS.has(c.id) ? 'disabled' : '';
+        const checked = listState.selectedCollections.has(c.id) ? 'checked' : '';
         return `
           <div class="qa-item" data-col-id="${c.id}">
             <div class="qa-item-row">
+              <input class="qa-check" type="checkbox" data-col-check-id="${c.id}" ${checked} />
               <div class="qa-item-main">
                 <div class="q">${escapeHtml(c.name || '（未命名合集）')}</div>
                 <div class="a">${n} 条</div>
@@ -1478,7 +1529,9 @@ function renderQaList() {
       .join('');
 
     ui.qaList.querySelectorAll('[data-col-id]').forEach((node) => {
-      node.addEventListener('click', () => {
+      node.addEventListener('click', (e) => {
+        const t = e.target;
+        if (t && t.matches && t.matches('input[type="checkbox"]')) return;
         const id = node.getAttribute('data-col-id');
         if (!id) return;
         setActiveCollection(id);
@@ -1493,6 +1546,17 @@ function renderQaList() {
       });
     });
 
+    ui.qaList.querySelectorAll('input[data-col-check-id]').forEach((node) => {
+      node.addEventListener('click', (e) => e.stopPropagation());
+      node.addEventListener('change', () => {
+        const id = node.getAttribute('data-col-check-id');
+        if (!id) return;
+        if (node.checked) listState.selectedCollections.add(id);
+        else listState.selectedCollections.delete(id);
+        updateSelectAllCollectionsState();
+      });
+    });
+
     ui.qaList.querySelectorAll('[data-col-del-id]').forEach((btn) => {
       btn.addEventListener('click', (e) => {
         e.preventDefault();
@@ -1502,6 +1566,8 @@ function renderQaList() {
         deleteCollectionById(id);
       });
     });
+
+    updateSelectAllCollectionsState();
     return;
   }
 
@@ -1509,6 +1575,7 @@ function renderQaList() {
   ui.checkSelectAll.disabled = false;
   if (ui.btnDeleteCollectionAll) ui.btnDeleteCollectionAll.disabled = false;
   if (ui.btnCollectionBack) ui.btnCollectionBack.disabled = false;
+  if (ui.btnExportDocxAll) ui.btnExportDocxAll.disabled = true;
   const col = state.collections.find((c) => c.id === listState.collectionId);
   if (ui.collectionTitle) ui.collectionTitle.textContent = col ? col.name : '合集';
 
@@ -2462,7 +2529,7 @@ function handleFinalUtterance(text) {
   const qa = getCurrentQa();
   if (!qa) return;
 
-  const { segments, bySentence } = getReciteSegmentsForQa(qa);
+  const { segments } = getReciteSegmentsForQa(qa);
   reciteCheck.pointerSegment = 0;
   advanceSegmentPointer(segments);
 
@@ -2490,7 +2557,7 @@ function handleFinalUtterance(text) {
     reciteCheck.lockedSegments.add(best.seg.globalIndex);
     reciteCheck.pointerSegment = 0;
     advanceSegmentPointer(segments);
-    const sentenceSegs = bySentence[best.seg.sentenceIndex] || [];
+    const sentenceSegs = segments.filter((x) => x.sentenceIndex === best.seg.sentenceIndex);
     const sentenceDone = sentenceSegs.length ? sentenceSegs.every((x) => reciteCheck.lockedSegments.has(x.globalIndex)) : false;
     ui.speechHint.textContent = sentenceDone
       ? `命中：第 ${best.seg.sentenceIndex + 1} 句完成（${best.sim.toFixed(2)}）`
@@ -2536,6 +2603,17 @@ function updateMatches() {
   }
   const recited = ui.inputRecited.value || '';
   if (!recited.trim()) {
+    if (reciteCheck.manualAuto) {
+      if (!reciteCheck.maskMode) {
+        reciteCheck.maskMode = true;
+        reciteCheck.pointerSegment = 0;
+        const { segments } = getReciteSegmentsForQa(qa);
+        advanceSegmentPointer(segments);
+      }
+      ui.matchSummary.textContent = '自动输入检测已开启：请录音或输入，系统会自动检测。';
+      renderCurrentQaView();
+      return;
+    }
     ui.matchSummary.textContent = '输入或录音后会显示命中情况。';
     renderCurrentQaView();
     return;
@@ -2575,6 +2653,11 @@ function runManualCheckFromText(raw, preserveAuto) {
   updateManualCheckButton();
 
   if (!raw.trim()) {
+    if (reciteCheck.manualAuto) {
+      reciteCheck.maskMode = true;
+      reciteCheck.pointerSegment = 0;
+      advanceSegmentPointer(segments);
+    }
     updateMatches();
     return;
   }
@@ -3173,6 +3256,384 @@ async function exportDocx() {
   }
 }
 
+async function exportDocxAllSelectedCollections() {
+  if (!window.docx) {
+    alert('DOCX 导出不可用：docx 库未加载。请刷新页面后重试。');
+    return;
+  }
+  ensureCollections();
+  const ids = [...listState.selectedCollections].filter(Boolean);
+  if (!ids.length) {
+    alert('请先勾选要导出的合集。');
+    return;
+  }
+
+  try {
+    const { Document, Packer, Paragraph, HeadingLevel, TextRun, HighlightColor } = window.docx;
+
+    const htmlParagraphsToDocxParas = (answerHtml, fallbackText) => {
+      const out = [];
+      const fallback = String(fallbackText || '').replace(/\r\n/g, '\n').trim();
+
+      const rawHtml = sanitizeAnswerHtml(normalizeImportedHtml(answerHtml || ''));
+      const htmlText = String(stripHtmlToText(rawHtml || '') || '').trim();
+
+      if (!htmlText) {
+        if (!fallback) return [new Paragraph({ text: '' })];
+        const paras = fallback
+          .split(/\n+/g)
+          .map((p) => p.trim())
+          .filter(Boolean);
+        return paras.length
+          ? paras.map((p) => new Paragraph({ children: [new TextRun({ text: p })] }))
+          : [new Paragraph({ text: '' })];
+      }
+
+      const mapColor = (c) => {
+        const v = String(c || '').toLowerCase();
+        if (v === 'green') return HighlightColor?.GREEN || 'green';
+        if (v === 'cyan') return HighlightColor?.CYAN || 'cyan';
+        if (v === 'magenta') return HighlightColor?.MAGENTA || 'magenta';
+        if (v === 'yellow') return HighlightColor?.YELLOW || 'yellow';
+        return HighlightColor?.YELLOW || 'yellow';
+      };
+
+      const makeTextRun = (text, style) => {
+        const opts = { text: String(text || '') };
+        if (style?.bold) opts.bold = true;
+        if (style?.highlight) opts.highlight = mapColor(style.highlightColor);
+        return new TextRun(opts);
+      };
+
+      const nodeToParagraphRunsList = (node, ctx) => {
+        const paras = [];
+        let cur = [];
+        let curHasText = false;
+
+        const pushCur = () => {
+          paras.push(curHasText ? cur : [new TextRun({ text: '' })]);
+          cur = [];
+          curHasText = false;
+        };
+
+        const walk = (n, style) => {
+          if (!n) return;
+          if (n.nodeType === Node.TEXT_NODE) {
+            const t = String(n.nodeValue || '');
+            if (t) {
+              if (t.trim()) curHasText = true;
+              cur.push(makeTextRun(t, style));
+            }
+            return;
+          }
+          if (n.nodeType !== Node.ELEMENT_NODE) return;
+          const tag = (n.tagName || '').toUpperCase();
+          if (tag === 'BR') {
+            pushCur();
+            return;
+          }
+          const next = { ...style };
+          if (tag === 'STRONG' || tag === 'B') next.bold = true;
+          if (tag === 'MARK') {
+            next.highlight = true;
+            const c = String(n.getAttribute?.('data-color') || '').toLowerCase();
+            next.highlightColor = c || next.highlightColor;
+          }
+          Array.from(n.childNodes || []).forEach((c) => walk(c, next));
+        };
+
+        walk(node, ctx || { bold: false, highlight: false });
+        if (cur.length || curHasText) pushCur();
+        return paras;
+      };
+
+      const doc = new DOMParser().parseFromString(rawHtml || '', 'text/html');
+      const body = doc.body;
+      if (!body || !body.childNodes.length) {
+        return [new Paragraph({ text: '' })];
+      }
+
+      const blocks = Array.from(body.children || []).filter((n) => {
+        const t = (n.tagName || '').toUpperCase();
+        return t === 'P' || t === 'DIV';
+      });
+      const topBlocks = blocks.length ? blocks : [body];
+
+      topBlocks.forEach((b, idx) => {
+        const runsList = nodeToParagraphRunsList(b, { bold: false, highlight: false });
+        runsList.forEach((runs) => out.push(new Paragraph({ children: runs })));
+        if (idx !== topBlocks.length - 1) out.push(new Paragraph({ text: '' }));
+      });
+
+      return out.length ? out : [new Paragraph({ text: '' })];
+    };
+
+    const cols = (Array.isArray(state.collections) ? state.collections : []).filter((c) => ids.includes(c.id));
+    if (!cols.length) {
+      alert('未找到要导出的合集。');
+      return;
+    }
+
+    const qas = Array.isArray(state.qas) ? state.qas : [];
+    const children = [];
+    cols.forEach((col, ci) => {
+      const colName = String(col?.name || '（未命名合集）');
+      children.push(new Paragraph({ text: colName, heading: HeadingLevel.HEADING_1 }));
+
+      const inCol = qas.filter((q) => (q.collectionId || DEFAULT_COLLECTION_ID) === col.id);
+      inCol.forEach((qa, qi) => {
+        const title = (qa.question || '').trim() || '（无标题）';
+        children.push(new Paragraph({ text: title, heading: HeadingLevel.HEADING_2 }));
+
+        const paras = htmlParagraphsToDocxParas(qa.answerHtml, qa.answerText);
+        paras.forEach((p) => children.push(p));
+
+        const fp = String(qa.focusPoints || '').trim();
+        if (fp) {
+          children.push(new Paragraph({ text: '背诵需关注的点', heading: HeadingLevel.HEADING_3 }));
+          fp
+            .split(/\n+/g)
+            .map((x) => x.trim())
+            .filter(Boolean)
+            .forEach((line) => {
+              children.push(new Paragraph({ children: [new TextRun({ text: line })] }));
+            });
+        }
+
+        if (qi !== inCol.length - 1) children.push(new Paragraph({ text: '' }));
+      });
+
+      if (ci !== cols.length - 1) children.push(new Paragraph({ text: '' }));
+    });
+
+    const doc = new Document({
+      sections: [
+        {
+          properties: {},
+          children,
+        },
+      ],
+    });
+
+    const blob = await Packer.toBlob(doc);
+    download(`总合集导出-${Date.now()}.docx`, blob);
+  } catch (e) {
+    console.error(e);
+    alert(`DOCX 导出失败：${e?.message || e}`);
+  }
+}
+
+function parseDocxHtmlToCollections(html) {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const body = doc.body;
+  if (!body) return [];
+
+  const out = [];
+
+  let curColName = '';
+  let curQas = [];
+
+  let curTitle = '';
+  let curParts = [];
+  let curFocusLines = [];
+  let focusMode = false;
+
+  const flushQa = () => {
+    const question = (curTitle || '').trim();
+    const answerHtml = curParts.join('').trim();
+    const answerText = htmlToPlainTextPreserveLines(answerHtml);
+    const focusPoints = curFocusLines.map((x) => String(x || '').trim()).filter(Boolean).join('\n');
+    if (question || answerText) {
+      curQas.push({
+        id: uid(),
+        question: question || '（未命名）',
+        answerHtml: sanitizeAnswerHtml(normalizeImportedHtml(answerHtml)),
+        answerText,
+        focusPoints,
+        createdAt: nowIso(),
+        updatedAt: nowIso(),
+      });
+    }
+    curTitle = '';
+    curParts = [];
+    curFocusLines = [];
+    focusMode = false;
+  };
+
+  const flushCol = () => {
+    if (curTitle || curParts.length || curFocusLines.length) flushQa();
+    const name = String(curColName || '').trim();
+    if (name && curQas.length) {
+      out.push({ name, qas: curQas });
+    }
+    curColName = '';
+    curQas = [];
+    curTitle = '';
+    curParts = [];
+    curFocusLines = [];
+    focusMode = false;
+  };
+
+  const nodes = Array.from(body.children);
+  for (const n of nodes) {
+    const tag = (n.tagName || '').toUpperCase();
+    const text = (n.textContent || '').replace(/[\u00a0]/g, ' ').trim();
+    if (!text) continue;
+
+    const isHeading = /^H[1-6]$/.test(tag);
+    if (isHeading) {
+      const level = Number(tag.slice(1));
+      if (level === 1) {
+        flushCol();
+        curColName = text;
+        continue;
+      }
+
+      if (level === 3 && text === '背诵需关注的点') {
+        focusMode = true;
+        continue;
+      }
+
+      if (level === 2) {
+        if (curTitle || curParts.length || curFocusLines.length) flushQa();
+        curTitle = text;
+        focusMode = false;
+        continue;
+      }
+
+      if (curTitle || curParts.length || curFocusLines.length) flushQa();
+      curTitle = text;
+      focusMode = false;
+      continue;
+    }
+
+    if (!curColName) {
+      curColName = '导入';
+    }
+    if (!curTitle && !curQas.length) {
+      curTitle = text;
+      continue;
+    }
+    if (focusMode) {
+      curFocusLines.push(text);
+      continue;
+    }
+    curParts.push(`<p>${normalizeImportedHtml(n.innerHTML || '')}</p>`);
+  }
+
+  flushCol();
+  return out;
+}
+
+async function importDocxAll(file) {
+  if (!window.mammoth) {
+    alert('docx 导入需要联网加载 mammoth 库（CDN）。');
+    return;
+  }
+  const buf = await file.arrayBuffer();
+  let html = '';
+  try {
+    html = (await docxArrayBufferToHtml(buf)) || '';
+  } catch {
+    html = '';
+  }
+  if (!html) {
+    const result = await window.mammoth.convertToHtml({ arrayBuffer: buf });
+    html = result?.value || '';
+  }
+
+  const groups = parseDocxHtmlToCollections(html);
+  if (!groups.length) {
+    alert('未从 docx 中识别出合集结构。请使用：H1=合集名，H2=问题，正文=答案 的格式。');
+    return;
+  }
+
+  ensureCollections();
+  const importedNew = [];
+  const updatedExistingIds = [];
+  let firstColId = null;
+
+  const collections = Array.isArray(state.collections) ? state.collections : [];
+  const qas = Array.isArray(state.qas) ? state.qas : [];
+
+  groups.forEach((g) => {
+    const rawName = normalizeImportedCollectionName(g.name);
+    const key = normalizeNameKey(rawName);
+    if (!key) return;
+
+    let col = collections.find((c) => normalizeNameKey(c?.name) === key);
+    if (!col) {
+      col = createCollection(rawName);
+    }
+    if (!firstColId) firstColId = col.id;
+
+    const inCol = qas.filter((q) => (q.collectionId || DEFAULT_COLLECTION_ID) === col.id);
+    const byQuestion = new Map();
+    inCol.forEach((q) => {
+      const qk = normalizeNameKey(q?.question);
+      if (qk) byQuestion.set(qk, q);
+    });
+
+    (g.qas || []).forEach((incoming) => {
+      const qText = String(incoming?.question || '').trim();
+      const qk = normalizeNameKey(qText);
+      if (!qk) return;
+
+      const existing = byQuestion.get(qk);
+      if (existing) {
+        const next = {
+          ...existing,
+          question: qText,
+          answerText: incoming?.answerText || '',
+          answerHtml: incoming?.answerHtml || '',
+          focusPoints: incoming?.focusPoints || '',
+          updatedAt: nowIso(),
+          collectionId: col.id,
+        };
+        upsertQa(next);
+        updatedExistingIds.push(existing.id);
+        byQuestion.set(qk, next);
+      } else {
+        const qa = {
+          id: uid(),
+          question: qText,
+          answerText: incoming?.answerText || '',
+          answerHtml: incoming?.answerHtml || '',
+          focusPoints: incoming?.focusPoints || '',
+          createdAt: nowIso(),
+          updatedAt: nowIso(),
+          collectionId: col.id,
+        };
+        importedNew.push(qa);
+        byQuestion.set(qk, qa);
+      }
+    });
+  });
+
+  if (!importedNew.length && !updatedExistingIds.length) {
+    alert('未从 docx 中解析出 QA。');
+    return;
+  }
+
+  if (importedNew.length) {
+    state.qas = [...importedNew, ...state.qas];
+  }
+
+  const firstQaId = importedNew[0]?.id || updatedExistingIds[0] || null;
+  if (firstQaId) state.progress.currentQaId = firstQaId;
+  if (firstColId) setActiveCollection(firstColId);
+  listState.page = 1;
+  listState.selected.clear();
+  listState.selectedCollections.clear();
+  saveState();
+  stopPlayer();
+  resetReciteCheck();
+  resetCardCheck();
+  render();
+  fillEditorFromCurrent();
+  updateMatches();
+}
+
 function importData(file) {
   const reader = new FileReader();
   reader.onload = () => {
@@ -3365,6 +3826,14 @@ ui.btnCheck.addEventListener('click', () => {
   reciteCheck.manualAuto = !reciteCheck.manualAuto;
   updateManualCheckButton();
   if (reciteCheck.manualAuto) {
+    reciteCheck.maskMode = true;
+    reciteCheck.pointerSegment = 0;
+    const qa = getCurrentQa();
+    if (qa) {
+      const { segments } = getReciteSegmentsForQa(qa);
+      advanceSegmentPointer(segments);
+    }
+    renderCurrentQaView();
     applyManualCheck(true);
   } else {
     resetReciteCheck();
@@ -3459,6 +3928,23 @@ window.addEventListener('resize', () => {
   showAnsMarkPaletteNearSelection();
 });
 
+let _lastSpokenSelection = '';
+function maybeSpeakSelection() {
+  const q = ui.viewQuestion;
+  const a = ui.viewAnswer;
+  if (!q && !a) return;
+  const txt = (q ? getSelectionTextIn(q) : '') || (a ? getSelectionTextIn(a) : '');
+  if (!txt) return;
+  if (txt === _lastSpokenSelection) return;
+  _lastSpokenSelection = txt;
+  speakText(txt);
+}
+
+ui.viewQuestion?.addEventListener('mouseup', () => setTimeout(maybeSpeakSelection, 0));
+ui.viewAnswer?.addEventListener('mouseup', () => setTimeout(maybeSpeakSelection, 0));
+ui.viewQuestion?.addEventListener('keyup', () => setTimeout(maybeSpeakSelection, 0));
+ui.viewAnswer?.addEventListener('keyup', () => setTimeout(maybeSpeakSelection, 0));
+
 ui.btnAsk.addEventListener('click', () => ask());
 ui.inputAsk.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') ask();
@@ -3466,6 +3952,7 @@ ui.inputAsk.addEventListener('keydown', (e) => {
 
 ui.btnExport.addEventListener('click', () => exportData());
 ui.btnExportDocx.addEventListener('click', () => exportDocx());
+ui.btnExportDocxAll?.addEventListener('click', () => exportDocxAllSelectedCollections());
 ui.btnQaTimerPause?.addEventListener('click', () => toggleQaTimerPause());
 ui.fileImport.addEventListener('change', (e) => {
   const f = e.target.files?.[0];
@@ -3473,6 +3960,13 @@ ui.fileImport.addEventListener('change', (e) => {
   const isDocx = f.name.toLowerCase().endsWith('.docx');
   if (isDocx) importDocx(f);
   else importData(f);
+  e.target.value = '';
+});
+
+ui.fileImportDocxAll?.addEventListener('change', (e) => {
+  const f = e.target.files?.[0];
+  if (!f) return;
+  importDocxAll(f);
   e.target.value = '';
 });
 
