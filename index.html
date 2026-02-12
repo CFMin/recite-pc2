@@ -247,6 +247,23 @@
                   <div id="matchSummary" class="summary">-</div>
                 </div>
               </div>
+
+              <div class="draft-board">
+                <div class="draft-board-header">
+                  <div class="muted">草稿画板（随题保存）</div>
+                  <div class="draft-board-actions">
+                    <select id="selectDraftPen" class="input input-compact">
+                      <option value="2">笔：细</option>
+                      <option value="4" selected>笔：中</option>
+                      <option value="7">笔：粗</option>
+                    </select>
+                    <button id="btnDraftClear" type="button" class="btn btn-secondary btn-mini">清空画板</button>
+                  </div>
+                </div>
+                <div class="draft-board-canvas-wrap">
+                  <canvas id="draftCanvas" class="draft-canvas"></canvas>
+                </div>
+              </div>
               <div id="speechHint" class="hint"></div>
             </div>
           </div>

@@ -40,6 +40,50 @@ function applyAnswerHighlight(color) {
   if (!range || range.collapsed) return;
 
   try {
+    // If selection overlaps existing marks, expand to cover them (merge highlights)
+    try {
+      const marks = Array.from(richRoot.querySelectorAll('mark'));
+      if (marks.length) {
+        const mergedRange = range.cloneRange();
+        let changed = false;
+        marks.forEach((m) => {
+          let hit = false;
+          try {
+            hit = mergedRange.intersectsNode(m);
+          } catch {
+            hit = false;
+          }
+          if (!hit) return;
+
+          const mr = document.createRange();
+          mr.selectNodeContents(m);
+
+          // Expand start
+          try {
+            if (mergedRange.compareBoundaryPoints(Range.START_TO_START, mr) > 0) {
+              mergedRange.setStart(mr.startContainer, mr.startOffset);
+              changed = true;
+            }
+          } catch {}
+
+          // Expand end
+          try {
+            if (mergedRange.compareBoundaryPoints(Range.END_TO_END, mr) < 0) {
+              mergedRange.setEnd(mr.endContainer, mr.endOffset);
+              changed = true;
+            }
+          } catch {}
+        });
+
+        if (changed) {
+          try {
+            sel.removeAllRanges();
+            sel.addRange(mergedRange);
+          } catch {}
+        }
+      }
+    } catch {}
+
     const mk = document.createElement('mark');
     mk.setAttribute('data-color', String(color || 'yellow'));
     const frag = range.extractContents();
@@ -52,6 +96,16 @@ function applyAnswerHighlight(color) {
       if (!outer) return;
       while (inner.firstChild) outer.insertBefore(inner.firstChild, inner);
       inner.remove();
+    });
+
+    // Merge adjacent marks with same data-color
+    richRoot.querySelectorAll('mark').forEach((m) => {
+      const c = m.getAttribute('data-color') || '';
+      const prev = m.previousSibling;
+      if (prev && prev.nodeType === Node.ELEMENT_NODE && prev.tagName === 'MARK' && (prev.getAttribute('data-color') || '') === c) {
+        while (m.firstChild) prev.appendChild(m.firstChild);
+        m.remove();
+      }
     });
 
     // Persist
@@ -921,6 +975,10 @@ const ui = {
   matchSummary: el('matchSummary'),
   speechHint: el('speechHint'),
 
+  draftCanvas: el('draftCanvas'),
+  btnDraftClear: el('btnDraftClear'),
+  selectDraftPen: el('selectDraftPen'),
+
   inputAsk: el('inputAsk'),
   btnAsk: el('btnAsk'),
   askAnswer: el('askAnswer'),
@@ -1077,6 +1135,194 @@ function ensureQaTimeMap() {
   if (!state.progress.qaTimeHistory) state.progress.qaTimeHistory = {};
 }
 
+function ensureDraftBoards() {
+  if (!state.progress) state.progress = { currentQaId: null };
+  if (!state.progress.draftBoards) state.progress.draftBoards = {};
+}
+
+const draftBoard = {
+  ready: false,
+  pointerId: null,
+  drawing: false,
+  lastX: 0,
+  lastY: 0,
+  saveTimer: null,
+};
+
+function getDraftBoardKeyForQa(qaId) {
+  return String(qaId || '');
+}
+
+function scheduleSaveDraftBoard() {
+  if (!ui.draftCanvas) return;
+  if (!state.progress?.currentQaId) return;
+  ensureDraftBoards();
+  if (draftBoard.saveTimer) clearTimeout(draftBoard.saveTimer);
+  draftBoard.saveTimer = setTimeout(() => {
+    draftBoard.saveTimer = null;
+    try {
+      const key = getDraftBoardKeyForQa(state.progress.currentQaId);
+      const dataUrl = ui.draftCanvas.toDataURL('image/png');
+      state.progress.draftBoards[key] = dataUrl;
+      saveState();
+    } catch {}
+  }, 400);
+}
+
+function clearDraftBoardForCurrent(save = true) {
+  if (!ui.draftCanvas) return;
+  const ctx = ui.draftCanvas.getContext('2d');
+  if (!ctx) return;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, ui.draftCanvas.width, ui.draftCanvas.height);
+  ctx.fillStyle = '#0f1730';
+  ctx.fillRect(0, 0, ui.draftCanvas.width, ui.draftCanvas.height);
+  ctx.restore();
+
+  if (save && state.progress?.currentQaId) {
+    ensureDraftBoards();
+    const key = getDraftBoardKeyForQa(state.progress.currentQaId);
+    try {
+      state.progress.draftBoards[key] = ui.draftCanvas.toDataURL('image/png');
+      saveState();
+    } catch {}
+  }
+}
+
+function resizeDraftCanvas() {
+  if (!ui.draftCanvas) return;
+  const rect = ui.draftCanvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.floor(rect.width * dpr));
+  const h = Math.max(1, Math.floor(rect.height * dpr));
+  if (ui.draftCanvas.width === w && ui.draftCanvas.height === h) return;
+
+  // Preserve existing drawing
+  let prev = null;
+  try {
+    prev = ui.draftCanvas.toDataURL('image/png');
+  } catch {}
+
+  ui.draftCanvas.width = w;
+  ui.draftCanvas.height = h;
+
+  clearDraftBoardForCurrent(false);
+  if (prev) loadDraftBoardFromDataUrl(prev, false);
+}
+
+function loadDraftBoardFromDataUrl(dataUrl, saveAfter = false) {
+  if (!ui.draftCanvas) return;
+  const ctx = ui.draftCanvas.getContext('2d');
+  if (!ctx) return;
+  clearDraftBoardForCurrent(false);
+  const src = String(dataUrl || '');
+  if (!src) {
+    if (saveAfter) scheduleSaveDraftBoard();
+    return;
+  }
+  const img = new Image();
+  img.onload = () => {
+    try {
+      ctx.drawImage(img, 0, 0, ui.draftCanvas.width, ui.draftCanvas.height);
+      if (saveAfter) scheduleSaveDraftBoard();
+    } catch {}
+  };
+  img.onerror = () => {
+    if (saveAfter) scheduleSaveDraftBoard();
+  };
+  img.src = src;
+}
+
+function loadDraftBoardForCurrentQa() {
+  if (!ui.draftCanvas) return;
+  ensureDraftBoards();
+  const qaId = state.progress?.currentQaId;
+  if (!qaId) {
+    clearDraftBoardForCurrent(false);
+    return;
+  }
+  const key = getDraftBoardKeyForQa(qaId);
+  const dataUrl = state.progress.draftBoards?.[key] || '';
+  loadDraftBoardFromDataUrl(dataUrl, false);
+}
+
+function initDraftBoard() {
+  if (draftBoard.ready) return;
+  if (!ui.draftCanvas) return;
+
+  const ctx = ui.draftCanvas.getContext('2d');
+  if (!ctx) return;
+
+  const getPenWidth = () => clamp(parseInt(ui.selectDraftPen?.value || '4', 10) || 4, 1, 20);
+
+  const toCanvasXY = (e) => {
+    const rect = ui.draftCanvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const x = (e.clientX - rect.left) * dpr;
+    const y = (e.clientY - rect.top) * dpr;
+    return { x, y };
+  };
+
+  const start = (e) => {
+    try {
+      ui.draftCanvas.setPointerCapture?.(e.pointerId);
+    } catch {}
+    draftBoard.pointerId = e.pointerId;
+    draftBoard.drawing = true;
+    const { x, y } = toCanvasXY(e);
+    draftBoard.lastX = x;
+    draftBoard.lastY = y;
+  };
+
+  const move = (e) => {
+    if (!draftBoard.drawing) return;
+    if (draftBoard.pointerId != null && e.pointerId !== draftBoard.pointerId) return;
+    const { x, y } = toCanvasXY(e);
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = '#e8ecff';
+    ctx.lineWidth = getPenWidth() * (window.devicePixelRatio || 1);
+    ctx.beginPath();
+    ctx.moveTo(draftBoard.lastX, draftBoard.lastY);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+    ctx.restore();
+    draftBoard.lastX = x;
+    draftBoard.lastY = y;
+    scheduleSaveDraftBoard();
+  };
+
+  const end = (e) => {
+    if (draftBoard.pointerId != null && e.pointerId !== draftBoard.pointerId) return;
+    draftBoard.drawing = false;
+    draftBoard.pointerId = null;
+    scheduleSaveDraftBoard();
+  };
+
+  ui.draftCanvas.addEventListener('pointerdown', (e) => start(e));
+  ui.draftCanvas.addEventListener('pointermove', (e) => move(e));
+  ui.draftCanvas.addEventListener('pointerup', (e) => end(e));
+  ui.draftCanvas.addEventListener('pointercancel', (e) => end(e));
+  ui.draftCanvas.addEventListener('pointerleave', (e) => end(e));
+
+  window.addEventListener('resize', () => {
+    resizeDraftCanvas();
+    loadDraftBoardForCurrentQa();
+  });
+
+  resizeDraftCanvas();
+  clearDraftBoardForCurrent(false);
+  loadDraftBoardForCurrentQa();
+
+  ui.btnDraftClear?.addEventListener('click', () => {
+    clearDraftBoardForCurrent(true);
+  });
+
+  draftBoard.ready = true;
+}
+
 function formatDurationMs(ms) {
   const s = Math.max(0, Math.floor(ms / 1000));
   const m = Math.floor(s / 60);
@@ -1227,6 +1473,9 @@ function setCurrentQa(id) {
   commitActiveQaTime();
   state.progress.currentQaId = id;
   ui.inputRecited.value = '';
+  initDraftBoard();
+  resizeDraftCanvas();
+  loadDraftBoardForCurrentQa();
   resetReciteCheck();
   resetCardCheck();
   saveState();
@@ -1911,6 +2160,13 @@ function render() {
   if (ui.qaReciteWrap) {
     ui.qaReciteWrap.classList.toggle('is-side-by-side', !!state?.settings?.qaReciteSideBySide);
   }
+
+  initDraftBoard();
+  // Defer resize until layout settles (fix pointer/draw offset)
+  requestAnimationFrame(() => {
+    resizeDraftCanvas();
+    loadDraftBoardForCurrentQa();
+  });
 }
 
 function deleteSelectedQas() {
